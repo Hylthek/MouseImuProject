@@ -21,7 +21,10 @@ add_executable(main
 )
 
 # Pull in dependencies
-target_link_libraries(main PUBLIC pico_stdlib pico_unique_id tinyusb_device tinyusb_board)
+target_link_libraries(main PUBLIC
+  pico_stdlib hardware_spi hardware_pwm # Main logic libraries.
+  pico_unique_id tinyusb_device tinyusb_board # USB boilerplate.
+)
 
 # Make sure TinyUSB can find tusb_config.h
 target_include_directories(main PRIVATE

@@ -33,48 +33,54 @@ enum {
 // IMU register addresses.
 enum {
   // Note that some are defined only for reference as bulk reads exists).
-  kPwrMgmt0    = 0x4E,
-  kAccelDataX1 = 0x1F,
-  kAccelDataX0 = 0x20,
-  kAccelDataY1 = 0x21,
-  kAccelDataY0 = 0x22,
-  kAccelDataZ1 = 0x23,
-  kAccelDataZ0 = 0x24,
-  kGyroDataX1  = 0x25,
-  kGyroDataX0  = 0x26,
-  kGyroDataY1  = 0x27,
-  kGyroDataY0  = 0x28,
-  kGyroDataZ1  = 0x29,
-  kGyroDataZ0  = 0x2A,
-  kIntConfig1  = 0x64,
-  kIntSource0  = 0x65,
-  kIntConfig   = 0x14,
-  kIntfConfig1 = 0x4d,
-  kRegBankSel  = 0x76,
-  kIntfConfig5 = 0x7b, // Note, this is in bank 1 , not bank 0.
+  kPwrMgmt0     = 0x4E,
+  kAccelDataX1  = 0x1F,
+  kAccelDataX0  = 0x20,
+  kAccelDataY1  = 0x21,
+  kAccelDataY0  = 0x22,
+  kAccelDataZ1  = 0x23,
+  kAccelDataZ0  = 0x24,
+  kGyroDataX1   = 0x25,
+  kGyroDataX0   = 0x26,
+  kGyroDataY1   = 0x27,
+  kGyroDataY0   = 0x28,
+  kGyroDataZ1   = 0x29,
+  kGyroDataZ0   = 0x2A,
+  kIntConfig1   = 0x64,
+  kIntSource0   = 0x65,
+  kIntConfig    = 0x14,
+  kIntfConfig1  = 0x4d,
+  kRegBankSel   = 0x76,
+  kIntfConfig5  = 0x7b, // Note, this is in bank 1 , not bank 0.
+  kAccelConfig0 = 0x50,
+  kGyroConfig0  = 0x4f,
 };
 
 // Constants
 enum {
-  kFixedToInt = 8, // The number of right shifts needed to turn the fixed point into its integer value or vise versa.
   kPrintfQueueMaxSize = 100000, // Designed to almost fill up heap memory ("OUT OF MEMORY" error occurs if too big).
 };
 
 // Configurables
 enum {
-  kLpfQueueMaxSize     = 10,  // The period (in samples) of the pseudo low pass filter used in the motion detector.
-  kMovementThreshold   = 20,  // The required difference (in IMUunits) between two points to signal movement.
-  kSteadinessThreshold = 25,  // The required time (in samples) of consistent inactivity to signal steadiness.
-  kBiasThresholdLog2  = 10,   // The log2 of the number of samples used to generate a set of final biases (eg. 10 = 1.024 seconds of biasing).
-  kHighpassCoefAccel = 99,    // When /100,  is the constant k in the highpass filter equation (0 => 0, 100 => out=in).
-  kHighpassCoefVel   = 99,    // When /100, the constant k in the highpass filter equation (0 => 0, 100 => out=in).
-  kLsbToDegrees = 170,        // When /100, the amount we divide IMU gyroscope samples by to get degrees per second.
+  kMovementLpfQueueMaxSize = 10,     // The period (in samples) of the pseudo low pass filter used in the motion detector.
+  kMovementThreshold       = 80,     // The required difference (in IMUunits) between two points to signal movement.
+  kSteadinessThreshold     = 25,     // The required time (in samples) of consistent inactivity to signal steadiness.
+  kHoverLpfQueueMaxSize      = 100,  // The period (in samples) of the pseudo low pass filter used in the motion detector.
+  kHoverThreshold            = 1000, // The required difference (in gyroscope units) between two (gx|gy) points to signal hovering.
+  kGroundedThreshold         = 10,  // The required time (in samples) of consistent non-hovering to signal grounding.
+  kBiasThreshold           = 1000,     // The number of samples used to generate a set of final biases.
+  kHighpassCoefAccel         = 90,   // When /100,  is the constant k in the highpass filter equation (0 => 0, 100 => out=in).
+  kHighpassCoefVel           = 10,   // When /100, the constant k in the highpass filter equation (0 => 0, 100 => out=in).
+  kLsbPerDegrees           = 668,    // When /10, the amount we divide IMU gyroscope samples by to get degrees per second.
 };
+static const float kOrientationCorrectionFactor = 0.05;
 
 // Globals
-typedef int fixed_point_t;
-fixed_point_t gDX = 0; // Fixed point numbers "added to" by main() "subtracted from" by send_hid_report(). 
-fixed_point_t gDY = 0; // Fixed point numbers "added to" by main() "subtracted from" by send_hid_report().
+float gDXMouse = 0; // Fixed point numbers "added to" by main() "subtracted from" by send_hid_report(). 
+float gDYMouse = 0; // Fixed point numbers "added to" by main() "subtracted from" by send_hid_report().
+float gDXGamepad = 0; // Ditto, but for the gamepad.
+float gDYGamepad = 0; // Ditto, but for the gamepad.
 
 // Function declarations.
 void SpiInit();
@@ -83,6 +89,8 @@ void LedTask(bool start_blink);
 void WtoQ(float w[3], float q[4]);
 void QuaternionMultiplication(float q_l[4], float q_r[4], float q_result[4]);
 void MultiplyQuaternionByVector(float q[4], float v[3], float result[3]);
+void RotationVectorAtoB(const float a[3], const float b[3], float result[3]);
+float VectorLength(const float a[3]);
 
 int main(void) {
   // Init debug printfs.
@@ -125,10 +133,12 @@ int main(void) {
 
   // Setup queues
   typedef struct {int16_t ax, ay, az, gx, gy, gz;} ImuSample; // Formatting a struct def this way puts it on the global namespace.
-  queue_t lpf_queue; // A queue containing the last "kLpfPeriod" of IMU samples.
+  queue_t movement_lpf_queue; // A queue containing the last "kMovementLpfPeriod" of IMU samples.
+  queue_t hover_lpf_queue; // A queue containing the last "kHoverLpfPeriod" of IMU samples.
   queue_t printf_queue; // A queue that stores IMU data so it can be printed later asynchronously
   {
-    queue_init(&lpf_queue, sizeof(ImuSample), kLpfQueueMaxSize);
+    queue_init(&movement_lpf_queue, sizeof(ImuSample), kMovementLpfQueueMaxSize);
+    queue_init(&hover_lpf_queue, sizeof(ImuSample), kHoverLpfQueueMaxSize);
     queue_init(&printf_queue, sizeof(int16_t), kPrintfQueueMaxSize);
   }
 
@@ -192,17 +202,18 @@ int main(void) {
       //    }
       //  }
       //  return 0;
-      //} 
+      //}
+      //continue; 
     }
 
     // Movement detector.
-    bool is_moving = false;
+    bool is_moving;
     {
       // Only processes data if there are enough samples.
       // Unconditionally add sample to LPF queue at end.
-      if (queue_is_full(&lpf_queue)) {
+      if (queue_is_full(&movement_lpf_queue)) {
         ImuSample sample_popped;
-        queue_try_remove(&lpf_queue, &sample_popped);
+        queue_try_remove(&movement_lpf_queue, &sample_popped);
   
         // Now sample_rxed and sample_popped are "kLpfPeriod" samples apart from each other.
         // Calculate all 6 differences.
@@ -215,11 +226,15 @@ int main(void) {
         diff[5] = abs(sample_rxed.gz - sample_popped.gz);
   
         // Calculate the maximum difference between the 6.
+        // Also calculate the maximum difference between gx and gy.
         int16_t max_diff = 0;
         for (int i = 0; i < 6; i++)
           max_diff = (max_diff > diff[i]) ? (max_diff) : (diff[i]);
+        int16_t max_diff_gxgy = 0;
+        max_diff_gxgy = (max_diff_gxgy > diff[3]) ? (max_diff_gxgy) : (diff[3]);
+        max_diff_gxgy = (max_diff_gxgy > diff[4]) ? (max_diff_gxgy) : (diff[4]);
   
-        // Update logic.
+        // Update logic (is_moving).
         static int steadiness_counter = 0; // A counter value that starts at kSteadinessThreshold and counts down.
         if (max_diff > kMovementThreshold) {
           // Set moving and reset counter.
@@ -235,28 +250,66 @@ int main(void) {
             is_moving = false;
         }
       }
-      queue_try_add(&lpf_queue, &sample_rxed);
+      queue_try_add(&movement_lpf_queue, &sample_rxed);
+    }
+
+    // Hover detector.
+    bool is_hovering;
+    {
+      // Only processes data if there are enough samples.
+      // Unconditionally add sample to LPF queue at end.
+      if (queue_is_full(&hover_lpf_queue)) {
+        ImuSample sample_popped;
+        queue_try_remove(&hover_lpf_queue, &sample_popped);
+  
+        // Now sample_rxed and sample_popped are "kLpfPeriod" samples apart from each other.
+        // Calculate all 6 differences.
+        int16_t diff[3] = {0};
+        diff[0] = abs(sample_rxed.gx - sample_popped.gx);
+        diff[1] = abs(sample_rxed.gy - sample_popped.gy);
+        diff[2] = abs(sample_rxed.az - sample_popped.az);
+  
+        // Calculate the maximum difference between gx and gy.
+        int16_t max_diff = 0;
+        for (int i = 0; i < 2; i++)
+          max_diff = (max_diff > diff[i]) ? (max_diff) : (diff[i]);
+  
+        // Update logic (is_moving).
+        static int grounded_counter = 0; // A counter value that starts at kSteadinessThreshold and counts down.
+        if (max_diff > kHoverThreshold) {
+          // Set moving and reset counter.
+          is_hovering = true;
+          grounded_counter = kGroundedThreshold;
+  
+        }
+        else {
+          // Check if last movement was still too recent.
+          if (grounded_counter > 0)
+            grounded_counter--;
+          else
+            is_hovering = false;
+        }
+      }
+      queue_try_add(&hover_lpf_queue, &sample_rxed);
     }
 
     // Debug feature, write movement boolean to LED.
     {
-      if (is_moving)
-        LedTask(true);
     }
 
     // Biasing.
     bool is_biased = false;
-    static fixed_point_t bias_final_ax = 0, bias_final_ay = 0, bias_final_az = 0, // Holds useable bias values.
-                         bias_final_gx = 0, bias_final_gy = 0, bias_final_gz = 0; // Note, acceleration biases are indistinguishable from gravity.
+    static float gravity_vec[3] = {0}; // Note, accelerometer bias is indistinguishable from gravity.
+    static float gyro_bias_vec[3] = {0};
     {
       // If not moving, add to biasing average.
       // If moving, reset biasing average.
-      static long int bias_avg_ax = 0, bias_avg_ay = 0, bias_avg_az = 0,
-                      bias_avg_gx = 0, bias_avg_gy = 0, bias_avg_gz = 0; // Holds incompletely averaged bias values.
+      static float bias_avg_ax = 0, bias_avg_ay = 0, bias_avg_az = 0,
+                   bias_avg_gx = 0, bias_avg_gy = 0, bias_avg_gz = 0; // Holds incompletely averaged bias values.
       static int num_samples_averaged = 0; // Holds how many samples are contributing to the current average.
       if (!is_moving) {
-        bias_avg_ax += sample_rxed.ax; // These MOST LIKELY wont overflow.
-        bias_avg_ay += sample_rxed.ay; // We will later shift the bias_avg values to get bias_final.
+        bias_avg_ax += sample_rxed.ax;
+        bias_avg_ay += sample_rxed.ay;
         bias_avg_az += sample_rxed.az; 
         bias_avg_gx += sample_rxed.gx; 
         bias_avg_gy += sample_rxed.gy; 
@@ -264,16 +317,15 @@ int main(void) {
         num_samples_averaged++;
   
         // If there are now enough samples, update bias_final and reset average.
-        const uint kBiasThreshold = 0b1 << kBiasThresholdLog2;
         if (num_samples_averaged >= kBiasThreshold) {
           is_biased = true;
            
-          bias_final_ax = bias_avg_ax << kFixedToInt >> kBiasThresholdLog2; // Reminder1: bias_final is a fixed_point_t,
-          bias_final_ay = bias_avg_ay << kFixedToInt >> kBiasThresholdLog2; // this is the shifting alluded to earlier.
-          bias_final_az = bias_avg_az << kFixedToInt >> kBiasThresholdLog2; // Reminder2: bitshift associativity is left to right.
-          bias_final_gx = bias_avg_gx << kFixedToInt >> kBiasThresholdLog2; 
-          bias_final_gy = bias_avg_gy << kFixedToInt >> kBiasThresholdLog2; // Second bit shift is analogous to the usual dividing by num_samples_averaged.
-          bias_final_gz = bias_avg_gz << kFixedToInt >> kBiasThresholdLog2;
+          gravity_vec[0] = bias_avg_ax / num_samples_averaged;
+          gravity_vec[1] = bias_avg_ay / num_samples_averaged;
+          gravity_vec[2] = bias_avg_az / num_samples_averaged;
+          gyro_bias_vec[0] = bias_avg_gx / num_samples_averaged;
+          gyro_bias_vec[1] = bias_avg_gy / num_samples_averaged;
+          gyro_bias_vec[2] = bias_avg_gz / num_samples_averaged;
   
           // Debug feature, blink LED when biases are calculated.
           LedTask(true);
@@ -294,19 +346,12 @@ int main(void) {
     // Update orientation quaternion.
     static float orientation_quat[4] = {1, 0, 0, 0}; // Integrated rotation speed, represented as a quaternion.
     {
-      if (is_biased) {
-        orientation_quat[0] = 1;
-        orientation_quat[1] = 0;
-        orientation_quat[2] = 0;
-        orientation_quat[3] = 0;
-      }
-      
       // Turn net rotation into a quaternion.
-      const float k = kLsbToDegrees/10.f;
+      static const float k = 10.0/kLsbPerDegrees * M_PI / 180.0 / 1024.0;
       float sample_rotation_vec[3] = {
-        (sample_rxed.gx - (bias_final_gx/256.f)) / k * M_PI / 180.f * 0.001f, // Units are in radians.
-        (sample_rxed.gy - (bias_final_gy/256.f)) / k * M_PI / 180.f * 0.001f, // Units are in radians.
-        (sample_rxed.gz - (bias_final_gz/256.f)) / k * M_PI / 180.f * 0.001f  // Units are in radians.
+        (sample_rxed.gx - gyro_bias_vec[0]) * k, // Units are in radians.
+        (sample_rxed.gy - gyro_bias_vec[1]) * k, // Units are in radians.
+        (sample_rxed.gz - gyro_bias_vec[2]) * k  // Units are in radians.
       };
       float sample_rot_quat[4] = {0};
       WtoQ(sample_rotation_vec, sample_rot_quat);
@@ -315,6 +360,14 @@ int main(void) {
       // We need to create a copy because QuaternionMultiplication references itself.
       float orientation_quat_cpy[4] = {orientation_quat[0], orientation_quat[1], orientation_quat[2], orientation_quat[3]};
       QuaternionMultiplication(orientation_quat_cpy, sample_rot_quat, orientation_quat);
+
+      // Normalize orientation to eliminate numerical error.
+      float quat_mag_sum;
+      for (int i = 0; i < 4; i++)
+        quat_mag_sum += orientation_quat[i]*orientation_quat[i];
+      float quat_mag = sqrtf(quat_mag_sum);
+      for (int i = 0; i < 4; i++)
+        orientation_quat[i] = orientation_quat[i]/quat_mag;
     }
 
     // Calculate orientation vector.
@@ -324,17 +377,48 @@ int main(void) {
       MultiplyQuaternionByVector(orientation_quat, unit_z, orientation_vec);
     }
 
+    // Correct orientation_quat a percentage of the way.
+    {
+      static bool biased = false;
+      if (is_biased)
+        biased = true;
+
+      if (biased) {
+        float a_hat[3] = {sample_rxed.ax, sample_rxed.ay, sample_rxed.az};
+        float a[3];
+        MultiplyQuaternionByVector(orientation_quat, a_hat, a);
+        const float a_mag = VectorLength(a);
+        float a_norm[3] = {a[0]/a_mag, a[1]/a_mag, a[2]/a_mag};
+
+        const float bias_mag = VectorLength(gravity_vec);
+        float bias_vec_norm[3] = {gravity_vec[0]/bias_mag, gravity_vec[1]/bias_mag, gravity_vec[2]/bias_mag};
+  
+        float correction_vec[3];
+        RotationVectorAtoB(a_norm, bias_vec_norm, correction_vec);
+        for (int i = 0; i < 3; i++)
+        if (is_moving)
+          correction_vec[i] = 0;
+        else
+          correction_vec[i] *= kOrientationCorrectionFactor;
+        float correction_quat[4];
+        WtoQ(correction_vec, correction_quat);
+  
+        float orientation_quat_cpy[4] = {orientation_quat[0], orientation_quat[1], orientation_quat[2], orientation_quat[3]};
+        QuaternionMultiplication(correction_quat, orientation_quat_cpy, orientation_quat);
+      }
+    }
+
     // Calculate global_accel.
     float global_accel_vec[3];
     {
       float sample_accel_vec[3] = {sample_rxed.ax, sample_rxed.ay, sample_rxed.az};
       MultiplyQuaternionByVector(orientation_quat, sample_accel_vec, global_accel_vec); 
-      global_accel_vec[0] -= bias_final_ax/256.f;
-      global_accel_vec[1] -= bias_final_ay/256.f;
-      global_accel_vec[2] -= bias_final_az/256.f;
+      global_accel_vec[0] -= gravity_vec[0];
+      global_accel_vec[1] -= gravity_vec[1];
+      global_accel_vec[2] -= gravity_vec[2];
     }
 
-    // Calculate highpass_accel_vec.
+    // Calculate highpass_accel_vec (unused currently).
     static float highpass_accel_vec[3] = {0};
     {
       static float prev_sample[3] = {0};
@@ -361,12 +445,11 @@ int main(void) {
     // Update velocity integral.
     static float global_vel_vec[3] = {0};
     {
-        
       for (int i = 0; i < 3; i++) {
         if (is_biased)
           global_vel_vec[i] = 0;
         else
-          global_vel_vec[i] += highpass_accel_vec[i]/1000.f;
+          global_vel_vec[i] += global_accel_vec[i]/1000.f;
       }
     }
 
@@ -377,7 +460,7 @@ int main(void) {
       float k;
 
       if (is_moving)
-        k = 1.f;
+        k = 0.999f;
       else
         k = kHighpassCoefVel/100.f;
 
@@ -401,6 +484,13 @@ int main(void) {
       if (count == 1000) {
         count = 0;
         //printf("\n%10f %10f %10f\n", global_accel_vec[0], global_accel_vec[1], global_accel_vec[2]);
+        //printf("\n%10f %10f %10f\n", bias_final_ax, bias_final_ay, bias_final_az);
+        //printf("%f\n\t%f\n\t%f\n\t%f\n",
+        //  orientation_quat[0],
+        //  orientation_quat[1],
+        //  orientation_quat[2],
+        //  orientation_quat[3]
+        //);
         //printf("%f\n\t%f\n\t%f\n\t%f\n",
         //  acosf(orientation_quat[0])*2*180/M_PI,
         //  orientation_quat[1]/sinf(acosf(orientation_quat[0])),
@@ -408,8 +498,9 @@ int main(void) {
         //  orientation_quat[3]/sinf(acosf(orientation_quat[0]))
         //);
         //printf("%3.2f %3.2f %3.2f\n", orientation_vec[0], orientation_vec[1], orientation_vec[2]);
-        printf("%3.2f %3.2f %3.2f\n", highpass_accel_vec[0], highpass_accel_vec[1], highpass_accel_vec[2]);
-        printf("%3.2f %3.2f %3.2f\n", highpass_vel_vec[0], highpass_vel_vec[1], highpass_vel_vec[2]);
+        //printf("%3.2f %3.2f %3.2f\n", highpass_accel_vec[0], highpass_accel_vec[1], highpass_accel_vec[2]);
+        //printf("%3.2f %3.2f %3.2f\n", global_vel_vec[0], global_vel_vec[1], global_vel_vec[2]);
+        //printf("%3.2f %3.2f %3.2f\n", highpass_vel_vec[0], highpass_vel_vec[1], highpass_vel_vec[2]);
       }
       else {
         count++;
@@ -417,11 +508,21 @@ int main(void) {
     }
 
     // Change mouse movement globals (communicates with hid_task()).
-    { 
-      gDX -= highpass_vel_vec[0] * 9000; // Positive = right.
-      gDY += highpass_vel_vec[1] * 9000; // Positive = down.
-      //gDX -= highpass_accel_vec[0] * 750; // Positive = right.
-      //gDY += highpass_accel_vec[1] * 750; // Positive = down.
+    if (!is_hovering)
+    {
+      //gDXMouse += global_accel_vec[0]; // Positive = right.
+      //gDYMouse -= global_accel_vec[1]; // Positive = down.
+      //gDXMouse -= highpass_accel_vec[0] * 250; // Positive = right.
+      //gDYMouse += highpass_accel_vec[1] * 250; // Positive = down.
+      //gDXMouse -= global_vel_vec[0] * 3000; // Positive = right.
+      //gDYMouse += global_vel_vec[1] * 3000; // Positive = down.
+      gDXMouse += highpass_vel_vec[0] * 100; // Positive = right.
+      gDYMouse -= highpass_vel_vec[1] * 100; // Positive = down.
+      //gDXMouse -= orientation_vec[0] * 40000; // Positive = right.
+      //gDYMouse += orientation_vec[1] * 40000; // Positive = down.
+
+      //gDXGamepad -= orientation_vec[0] * 256;
+      //gDYGamepad += orientation_vec[1] * 256;
     }
 
     // Debug feature, unpulse at end of interrupt.
@@ -435,44 +536,91 @@ static void send_hid_report(uint8_t report_id) {
   if (!tud_hid_ready())
     return;
 
-  // Calculate amount to move cursor / "subtract" from gDX & gDY.
-  // turn to ints and manually saturate.
-  const int kShiftFactor = 18; // To shift output for useability.
-  int dx = gDX >> kShiftFactor;
-  int dy = gDY >> kShiftFactor;
-  if (dx > 127)
-    dx = 127;
-  if (dx < -128)
-    dx = -128;
-  if (dy > 127)
-    dy = 127;
-  if (dy < -128)
-    dy = -128;
+  switch (report_id) {
+    case REPORT_ID_MOUSE: {
+      // Calculate amount to move cursor / "subtract" from gDXMouse & gDYMouse.
+      // turn to ints and manually saturate.
+      const int kFactor = 5000; // To divide output for useability.
+      int dx = gDXMouse / kFactor;
+      int dy = gDYMouse / kFactor;
+      if (dx > 127)
+        dx = 127;
+      if (dx < -128)
+        dx = -128;
+      if (dy > 127)
+        dy = 127;
+      if (dy < -128)
+        dy = -128;
+    
+      // Debug feature, print mouse report deltas.
+      //printf("%02x %02x\n", (uint8_t)dx, (uint8_t)dy);
+    
+      // Move mouse.
+      tud_hid_mouse_report(REPORT_ID_MOUSE, 0x00, dx, dy, 0, 0);
+    
+      // Subtract the amount moved.
+      gDXMouse -= dx * kFactor;
+      gDYMouse -= dy * kFactor;
 
-  // Debug feature, print mouse report deltas.
-  //printf("%02x %02x\n", (uint8_t)dx, (uint8_t)dy);
+      break;
+    }
+    
+    case REPORT_ID_GAMEPAD: {
+      // Same process as above.
+      const int kFactor = 5000;
+      int dx = gDXGamepad / kFactor;
+      int dy = gDYGamepad / kFactor;
+      if (dx > 127)
+        dx = 127;
+      if (dx < -128)
+        dx = -128;
+      if (dy > 127)
+        dy = 127;
+      if (dy < -128)
+        dy = -128;
 
-  // Move mouse.
-  tud_hid_mouse_report(REPORT_ID_MOUSE, 0x00, dx, dy, 0, 0);
+      hid_gamepad_report_t report = {
+        .x  = dx,
+        .y  = dy,
+        .z  = 0,
+        .rz = 0,
+        .rx = 0,
+        .ry = 0,
+        .hat = 0,
+        .buttons = 0
+      };
 
-  // Subtract the amount moved.
-  gDX -= dx << kShiftFactor;
-  gDY -= dy << kShiftFactor;
+      tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
+
+      gDXGamepad -= dx * kFactor;
+      gDYGamepad -= dy * kFactor;
+  
+      break;
+    }
+  }
 }
 
 // Invoked when device is mounted.
-void tud_mount_cb(void) {}
+void tud_mount_cb(void) {
+
+}
 
 // Invoked when device is unmounted.
-void tud_umount_cb(void) {}
+void tud_umount_cb(void) {
+
+}
 
 // Invoked when usb bus is suspended.
 // remote_wakeup_en : if host allows us to perform remote wakeup.
 // Within 7ms, device must draw an average of current less than 2.5 mA from bus.
-void tud_suspend_cb(bool remote_wakeup_en) {}
+void tud_suspend_cb(bool remote_wakeup_en) {
+
+}
 
 // Invoked when usb bus is resumed
-void tud_resume_cb(void) {}
+void tud_resume_cb(void) {
+
+}
 
 // Calls send_hid_report if it has been long nough since the last call.
 void hid_task(void) {
@@ -496,19 +644,29 @@ void hid_task(void) {
 }
 
 // Invoked when sent REPORT successfully to host.
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len) {}
+void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len) {
+  (void) instance;
+  (void) len;
+
+  if (report[0] == REPORT_ID_MOUSE)
+    send_hid_report(REPORT_ID_GAMEPAD);
+}
 
 // Invoked when received GET_REPORT control request. Application must fill buffer report's content and return its length.
 // Return zero will cause the stack to STALL request.
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {return 0;}
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+  return 0;
+}
 
 // Invoked when received SET_REPORT control request or received data on OUT endpoint ( Report ID = 0, Type = 0 ).
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {}
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+
+}
 
 // Call with true to initiaze a blink, call with false to turn off the LED if the blink is done. 
 void LedTask(bool start_blink) {
 
-  const int millis_on = 25;
+  const int millis_on = 10;
   static int start_millis = 0;
 
   if (start_blink) {
@@ -589,6 +747,13 @@ void SpiInit() {
   out_buf[4] = kRegBankSel;
   out_buf[5] = 0b00000000; // Change from bank 1 to bank 0.
   spi_write_read_blocking(spi0, out_buf, in_buf, 6);
+
+  out_buf[0] = kAccelConfig0;
+  out_buf[1] = 0b01000110; // Change FS from +-16g to +-4g.
+  spi_write_read_blocking(spi0, out_buf, in_buf, 2);
+  out_buf[0] = kGyroConfig0;
+  out_buf[1] = 0b01000110; // Change FS from +-2000dps to +-500dps.
+  spi_write_read_blocking(spi0, out_buf, in_buf, 2);
 }
 
 // Sin(x)/x.
@@ -621,7 +786,7 @@ void QuaternionMultiplication(float q_l[4], float q_r[4], float q_result[4]) {
 }
 
 // Vector cross product.
-void CrossProduct(float a[3], float b[3], float c[3]) {
+void CrossProduct(float a[3], const float b[3], const float c[3]) {
   a[0] = (b[1]*c[2] - b[2]*c[1]);
   a[1] = (b[2]*c[0] - b[0]*c[2]);
   a[2] = (b[0]*c[1] - b[1]*c[0]);
@@ -638,3 +803,24 @@ void MultiplyQuaternionByVector(float q[4], float v[3], float result[3]) {
   result[1] = v[1] + 2*(w*uv[1] + vecuv[1]);
   result[2] = v[2] + 2*(w*uv[2] + vecuv[2]);
 }
+
+float VectorLength(const float a[3]) {
+  return sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+}
+
+float VectorDot(const float a[3], const float b[3]) {
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+// Compute the rotation vector that rotates unit length vector a to unit length
+// vector b. This handles the singularity when a == b.
+void RotationVectorAtoB(const float a[3], const float b[3], float result[3]) {
+  float acb[3];
+  CrossProduct(acb, a, b);
+  float acb_length = VectorLength(acb);
+  float scale = 1.0f / Sinc(atan2(acb_length, VectorDot(a, b)));
+  result[0] = acb[0] * scale;
+  result[1] = acb[1] * scale;
+  result[2] = acb[2] * scale;
+}
+

@@ -178,32 +178,30 @@ int main(void) {
     }
 
     // Debug feature, print matlab data asynchronously.
-    { 
-      //int curr_time = board_millis();
-      //queue_try_add(&printf_queue, &sample_rxed.ax);
-      //queue_try_add(&printf_queue, &sample_rxed.ay);
-      //queue_try_add(&printf_queue, &sample_rxed.az);
-      //queue_try_add(&printf_queue, &sample_rxed.gx);
-      //queue_try_add(&printf_queue, &sample_rxed.gy);
-      //queue_try_add(&printf_queue, &sample_rxed.gz);
-      //queue_try_add(&printf_queue, &curr_time);
-      //if (queue_is_full(&printf_queue)) {
-      //  int i = 1;
-      //  while (!queue_is_empty(&printf_queue)) {
-      //    int16_t out;
-      //    queue_try_remove(&printf_queue, &out);
-      //    printf("%d ", out);
-      //    if (i == 7) {
-      //      printf("\n");
-      //      i = 1;
-      //    }
-      //    else {
-      //      i++;
-      //    }
-      //  }
-      //  return 0;
-      //}
-      //continue; 
+    if (false) { 
+      queue_try_add(&printf_queue, &sample_rxed.ax);
+      queue_try_add(&printf_queue, &sample_rxed.ay);
+      queue_try_add(&printf_queue, &sample_rxed.az);
+      queue_try_add(&printf_queue, &sample_rxed.gx);
+      queue_try_add(&printf_queue, &sample_rxed.gy);
+      queue_try_add(&printf_queue, &sample_rxed.gz);
+      if (queue_is_full(&printf_queue)) {
+        int i = 1;
+        while (!queue_is_empty(&printf_queue)) {
+          int16_t out;
+          queue_try_remove(&printf_queue, &out);
+          printf("%d ", out);
+          if (i == 6) {
+            printf("\n");
+            i = 1;
+          }
+          else {
+            i++;
+          }
+        }
+        return 0;
+      }
+      continue; 
     }
 
     // Movement detector.
@@ -362,7 +360,7 @@ int main(void) {
       QuaternionMultiplication(orientation_quat_cpy, sample_rot_quat, orientation_quat);
 
       // Normalize orientation to eliminate numerical error.
-      float quat_mag_sum;
+      float quat_mag_sum = 0;
       for (int i = 0; i < 4; i++)
         quat_mag_sum += orientation_quat[i]*orientation_quat[i];
       float quat_mag = sqrtf(quat_mag_sum);
@@ -449,7 +447,7 @@ int main(void) {
         if (is_biased)
           global_vel_vec[i] = 0;
         else
-          global_vel_vec[i] += global_accel_vec[i]/1000.f;
+          global_vel_vec[i] += global_accel_vec[i]/1024.f;
       }
     }
 
@@ -514,10 +512,10 @@ int main(void) {
       //gDYMouse -= global_accel_vec[1]; // Positive = down.
       //gDXMouse -= highpass_accel_vec[0] * 250; // Positive = right.
       //gDYMouse += highpass_accel_vec[1] * 250; // Positive = down.
-      //gDXMouse -= global_vel_vec[0] * 3000; // Positive = right.
-      //gDYMouse += global_vel_vec[1] * 3000; // Positive = down.
-      gDXMouse += highpass_vel_vec[0] * 100; // Positive = right.
-      gDYMouse -= highpass_vel_vec[1] * 100; // Positive = down.
+      gDXMouse += global_vel_vec[0] * 100; // Positive = right.
+      gDYMouse -= global_vel_vec[1] * 100; // Positive = down.
+      //gDXMouse += highpass_vel_vec[0] * 100; // Positive = right.
+      //gDYMouse -= highpass_vel_vec[1] * 100; // Positive = down.
       //gDXMouse -= orientation_vec[0] * 40000; // Positive = right.
       //gDYMouse += orientation_vec[1] * 40000; // Positive = down.
 

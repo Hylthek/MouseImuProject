@@ -14,23 +14,28 @@
 // Pins
 enum {
   // RP2040 GPIO pins (no UART control).
-  kSpiIntPin = 20, // Goes low at IMU data ready.
-  kSpiCsnPin = 17, // Chip select.
-  kSpiSckPin = 18, // SPI clock
-  kSpiTxPin =  19, // MOSI
-  kSpiRxPin =  16, // MISO
+  kImuRxPin =  16, // MISO
+  kImuCsnPin = 17, // Chip select.
+  kImuSckPin = 18, // SPI clock
+  kImuTxPin =  19, // MOSI
+  kImuIntPin = 20, // Goes low at IMU data ready.
   kImuClkinPin = 21, // Insert a 32.77kHz square wave to replace embedded IMU clock.
-  kUartDePin  = 3, // used to disable rs485 driver #1.
-  kUartDePin2 = 6, // used to disable rs485 driver #2.
-  kUartRePin  = 2, // For both RS485 drivers.
+  kPixArtIntPin = 7, // Negedge signals data ready.
+  kPixArtRxPin =  8,
+  kPixArtCsnPin = 9,
+  kPixArtSckPin = 10,
+  kPixArtTxPin =  11,
+  kPixArtResetnPin = 12,
+  kTtlTxPin = 4, // For communicating with the other board (SE-UART).
+  kTtlRxPin = 5, // For communicating with the other board (SE-UART).
 
   // Debugging pins.
-  kDebugPin1 = 12,
-  kDebugPin2 = 13,
+  kDebugPin1 = 0,
+  kDebugPin2 = 1,
   kLedPin = 25,
 };
 
-// IMU register addresses.
+// Chip register addresses.
 enum {
   // Note that some are defined only for reference as bulk reads exists).
   kPwrMgmt0     = 0x4E,
@@ -74,7 +79,7 @@ enum {
   kHighpassCoefVel           = 10,   // When /100, the constant k in the highpass filter equation (0 => 0, 100 => out=in).
   kLsbPerDegrees           = 668,    // When /10, the amount we divide IMU gyroscope samples by to get degrees per second.
 };
-static const float kOrientationCorrectionFactor = 0.05;
+static const float kOrientationCorrectionFactor = 0.001;
 
 // Globals
 float gDXMouse = 0; // Fixed point numbers "added to" by main() "subtracted from" by send_hid_report(). 
@@ -91,6 +96,7 @@ void QuaternionMultiplication(float q_l[4], float q_r[4], float q_result[4]);
 void MultiplyQuaternionByVector(float q[4], float v[3], float result[3]);
 void RotationVectorAtoB(const float a[3], const float b[3], float result[3]);
 float VectorLength(const float a[3]);
+void RfromQ (float R[3][3], const float q[4]);
 
 int main(void) {
   // Init debug printfs.
@@ -158,7 +164,7 @@ int main(void) {
     }
     
     // IMU interrupt checking.
-    if (gpio_get(kSpiIntPin) == true)
+    if (gpio_get(kImuIntPin) == true)
       continue;
     
     // Debug feature, pulse debug pin on interrupt negedge.
@@ -296,10 +302,10 @@ int main(void) {
     }
 
     // Biasing.
-    bool is_biased = false;
+    static bool is_biased = false;
     static float gravity_vec[3] = {0}; // Note, accelerometer bias is indistinguishable from gravity.
     static float gyro_bias_vec[3] = {0};
-    {
+    if (!is_biased) {
       // If not moving, add to biasing average.
       // If moving, reset biasing average.
       static float bias_avg_ax = 0, bias_avg_ay = 0, bias_avg_az = 0,
@@ -370,7 +376,7 @@ int main(void) {
 
     // Calculate orientation vector.
     float orientation_vec[3];
-    {
+    if (false) {
       float unit_z[3] = {0,0,1};
       MultiplyQuaternionByVector(orientation_quat, unit_z, orientation_vec);
     }
@@ -394,10 +400,7 @@ int main(void) {
         float correction_vec[3];
         RotationVectorAtoB(a_norm, bias_vec_norm, correction_vec);
         for (int i = 0; i < 3; i++)
-        if (is_moving)
-          correction_vec[i] = 0;
-        else
-          correction_vec[i] *= kOrientationCorrectionFactor;
+        correction_vec[i] *= kOrientationCorrectionFactor;
         float correction_quat[4];
         WtoQ(correction_vec, correction_quat);
   
@@ -408,7 +411,7 @@ int main(void) {
 
     // Calculate global_accel.
     float global_accel_vec[3];
-    {
+    if (false) {
       float sample_accel_vec[3] = {sample_rxed.ax, sample_rxed.ay, sample_rxed.az};
       MultiplyQuaternionByVector(orientation_quat, sample_accel_vec, global_accel_vec); 
       global_accel_vec[0] -= gravity_vec[0];
@@ -418,7 +421,7 @@ int main(void) {
 
     // Calculate highpass_accel_vec (unused currently).
     static float highpass_accel_vec[3] = {0};
-    {
+    if (false) {
       static float prev_sample[3] = {0};
       float k;
       if (is_moving)
@@ -442,7 +445,7 @@ int main(void) {
 
     // Update velocity integral.
     static float global_vel_vec[3] = {0};
-    {
+    if (false) {
       for (int i = 0; i < 3; i++) {
         if (is_biased)
           global_vel_vec[i] = 0;
@@ -453,7 +456,7 @@ int main(void) {
 
     // Calculate highpass_vel_vec.
     static float highpass_vel_vec[3] = {0};
-    {
+    if (false) {
       static float prev_sample[3] = {0};
       float k;
 
@@ -476,11 +479,45 @@ int main(void) {
         prev_sample[i] = global_vel_vec[i];
     }
 
+    // Calculate yaw, roll, pitch, and their 1-sample derivatives.
+    float yaw=0, roll=0, pitch=0;
+    float ddx_yaw=0, ddx_roll=0, ddx_pitch=0;
+    float R[3][3];
+    {
+      RfromQ(R, orientation_quat);
+      yaw   =  atan2f( R[1][0], R[0][0]);
+      roll  =  atan2f(-R[2][0], sqrt(R[2][1]*R[2][1] + R[2][2]*R[2][2]));
+      pitch = -atan2f( R[2][1], R[2][2]);
+
+      // Take the derivative every n samples
+      static const int n = 1;
+      static int count = 0;
+      if (count == n) {
+        count = 0;
+        static float prev_yaw = 0, prev_roll = 0, prev_pitch = 0;
+        ddx_yaw  = (yaw - prev_yaw) / n;
+        prev_yaw = yaw;
+        ddx_roll  = (roll - prev_roll) / n;
+        prev_roll = roll;
+        ddx_pitch = (pitch - prev_pitch) / n;
+        prev_pitch = pitch;
+      }
+      count++;
+    }
+
     // Debug feature, print values intermittently.
     {
       static int count = 0;
       if (count == 1000) {
         count = 0;
+        static const float k = 180.0/M_PI;
+
+        //printf("%f %f %f\n%f %f %f\n%f %f %f\n\n",
+        //  R[0][0], R[0][1], R[0][2], 
+        //  R[1][0], R[1][1], R[1][2], 
+        //  R[2][0], R[2][1], R[2][2] 
+        //);
+        //printf("\n%f %f %f\n", yaw*k, roll*k, pitch*k);
         //printf("\n%10f %10f %10f\n", global_accel_vec[0], global_accel_vec[1], global_accel_vec[2]);
         //printf("\n%10f %10f %10f\n", bias_final_ax, bias_final_ay, bias_final_az);
         //printf("%f\n\t%f\n\t%f\n\t%f\n",
@@ -506,18 +543,22 @@ int main(void) {
     }
 
     // Change mouse movement globals (communicates with hid_task()).
-    if (!is_hovering)
+    if (true)
     {
+      // Note, units are in pixels.
+      
       //gDXMouse += global_accel_vec[0]; // Positive = right.
       //gDYMouse -= global_accel_vec[1]; // Positive = down.
       //gDXMouse -= highpass_accel_vec[0] * 250; // Positive = right.
       //gDYMouse += highpass_accel_vec[1] * 250; // Positive = down.
-      gDXMouse += global_vel_vec[0] * 100; // Positive = right.
-      gDYMouse -= global_vel_vec[1] * 100; // Positive = down.
+      //gDXMouse += global_vel_vec[0] * 100; // Positive = right.
+      //gDYMouse -= global_vel_vec[1] * 100; // Positive = down.
       //gDXMouse += highpass_vel_vec[0] * 100; // Positive = right.
       //gDYMouse -= highpass_vel_vec[1] * 100; // Positive = down.
-      //gDXMouse -= orientation_vec[0] * 40000; // Positive = right.
-      //gDYMouse += orientation_vec[1] * 40000; // Positive = down.
+      //gDXMouse += orientation_vec[0] * 1000; // Positive = right.
+      //gDYMouse -= orientation_vec[1] * 1000; // Positive = down.
+      gDXMouse += ddx_roll  * 1920.0f/1.5702; // Positive = right.
+      gDYMouse -= ddx_pitch * 1080.0f/1.5702; // Positive = down.
 
       //gDXGamepad -= orientation_vec[0] * 256;
       //gDYGamepad += orientation_vec[1] * 256;
@@ -538,7 +579,7 @@ static void send_hid_report(uint8_t report_id) {
     case REPORT_ID_MOUSE: {
       // Calculate amount to move cursor / "subtract" from gDXMouse & gDYMouse.
       // turn to ints and manually saturate.
-      const int kFactor = 5000; // To divide output for useability.
+      const int kFactor = 1; // To divide output for useability.
       int dx = gDXMouse / kFactor;
       int dy = gDYMouse / kFactor;
       if (dx > 127)
@@ -679,33 +720,19 @@ void LedTask(bool start_blink) {
 
 // Initialize SPIbus and disable UARTbus.
 void SpiInit() {
-  // Disable UARTbus.
-  gpio_init(kUartDePin);
-  gpio_set_dir(kUartDePin, GPIO_OUT);
-  gpio_disable_pulls(kUartDePin);
-  gpio_put(kUartDePin, 0);
-  gpio_init(kUartDePin2);
-  gpio_set_dir(kUartDePin2, GPIO_OUT);
-  gpio_disable_pulls(kUartDePin2);
-  gpio_put(kUartDePin2, 0);
-  gpio_init(kUartRePin);
-  gpio_set_dir(kUartRePin, GPIO_OUT);
-  gpio_disable_pulls(kUartRePin);
-  gpio_put(kUartRePin, 1);
-
   // SPI interupt pin initialization.
-  gpio_init(kSpiIntPin);
-  gpio_set_dir(kSpiIntPin, GPIO_IN);
-  gpio_disable_pulls(kSpiIntPin);
-  gpio_pull_up(kSpiIntPin);
+  gpio_init(kImuIntPin);
+  gpio_set_dir(kImuIntPin, GPIO_IN);
+  gpio_disable_pulls(kImuIntPin);
+  gpio_pull_up(kImuIntPin);
   
   // SPI bus initialization. (1MHZ)(0b1 = high/low?)(phase = ??)(most sig. bit first)
   spi_init(spi0, 1000 * 1000);
   spi_set_format(spi0, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
-  gpio_set_function(kSpiRxPin, GPIO_FUNC_SPI); 
-  gpio_set_function(kSpiSckPin, GPIO_FUNC_SPI); 
-  gpio_set_function(kSpiTxPin, GPIO_FUNC_SPI); 
-  gpio_set_function(kSpiCsnPin, GPIO_FUNC_SPI); 
+  gpio_set_function(kImuRxPin, GPIO_FUNC_SPI); 
+  gpio_set_function(kImuSckPin, GPIO_FUNC_SPI); 
+  gpio_set_function(kImuTxPin, GPIO_FUNC_SPI); 
+  gpio_set_function(kImuCsnPin, GPIO_FUNC_SPI); 
 
   // IMU CLKIN PWM pin initialization.
   const int kDivisorInt = 19; // No idea how (int, frac) clock divider works.
@@ -822,3 +849,21 @@ void RotationVectorAtoB(const float a[3], const float b[3], float result[3]) {
   result[2] = acb[2] * scale;
 }
 
+void RfromQ (float R[3][3], const float q[4])
+{
+  // q = (s,vx,vy,vz)
+  float qq1 = 2*q[1]*q[1];
+  float qq2 = 2*q[2]*q[2];
+  float qq3 = 2*q[3]*q[3];
+  R[0][0] = 1 - qq2 - qq3;
+  R[0][1] = 2*(q[1]*q[2] - q[0]*q[3]);
+  R[0][2] = 2*(q[1]*q[3] + q[0]*q[2]);
+
+  R[1][0] = 2*(q[1]*q[2] + q[0]*q[3]);
+  R[1][1] = 1 - qq1 - qq3;
+  R[1][2] = 2*(q[2]*q[3] - q[0]*q[1]);
+
+  R[2][0] = 2*(q[1]*q[3] - q[0]*q[2]);
+  R[2][1] = 2*(q[2]*q[3] + q[0]*q[1]);
+  R[2][2] = 1 - qq1 - qq2;
+}

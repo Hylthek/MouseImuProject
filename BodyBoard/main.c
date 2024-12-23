@@ -1,15 +1,19 @@
+// C includes.
 #include <stdlib.h>
 #include <math.h>
 
+// Pico SDK includes.
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "hardware/uart.h"
 #include "hardware/pwm.h"
 #include "pico/util/queue.h"
 
+// TinyUSB includes.
 #include "bsp/board.h"
 #include "tusb.h"
 
+// Local includes.
 #include "usb_descriptors.h"
 
 // Pins
@@ -91,17 +95,18 @@ enum {
 static const float kOrientationCorrectionFactor = 0.001;
 
 // Globals
-float gDXMouse = 0; // Numbers "added to" by main() "subtracted from" by send_hid_report(). 
-float gDYMouse = 0; // Numbers "added to" by main() "subtracted from" by send_hid_report().
-float gDXGamepad = 0; // Ditto, but for the gamepad HID subclass.
-float gDYGamepad = 0; // Ditto, but for the gamepad HID subclass.
-queue_t gByteQueue; // Pushed by Uart1InterruptHandler(), popped by main().
+float gDXMouse = 0;     // Numbers "added to" by main() "subtracted from" by send_hid_report(). 
+float gDYMouse = 0;     // Numbers "added to" by main() "subtracted from" by send_hid_report().
+float gDXGamepad = 0;   // Ditto, but for the gamepad HID subclass.
+float gDYGamepad = 0;   // Ditto, but for the gamepad HID subclass.
+queue_t gByteQueue;     // Pushed by Uart1InterruptHandler(), popped by main().
 bool gMB1 = false, gMB2 = false, gMB3 = false; // Set in main() and used in send_hid_report().
-int8_t gScrlUps = 0; // Set in main() and used in send_hid_report().
+int8_t gScrlUps = 0;    // Set in main() and used in send_hid_report().
+bool gScrlUp = false;   // Set in main() and used in send_hid_report().
+bool gScrlDown = false; // Set in main() and used in send_hid_report().
 int16_t gHeadRoll = 0;  // Set in main() and used in send_hid_report(). Units are 1/10ths of a degree.
 int16_t gHeadPitch = 0; // Set in main() and used in send_hid_report(). Units are 1/10ths of a degree.
 int16_t gHeadYaw = 0;   // Set in main() and used in send_hid_report(). Units are 1/10ths of a degree.
-int gMouseMode = 0; // 0 = normal mode, 1 = elliptical-orbit-demo mode.
 
 // Function declarations.
 void ImuInit();
@@ -207,12 +212,17 @@ int main(void) {
       LedTask(false);
       hid_task();
       HeadBoardReqTask();
+
+      if (tud_hid_ready())
+        gpio_put(kDebugPin2, 0);
+      else
+        gpio_put(kDebugPin2, 1);
     }
     
     // IMU interrupt checking.
     if (gpio_get(kImuIntPin) == false) {
       // Debug feature, pulse debug pin on interrupt negedge.
-      gpio_put(kDebugPin2, 0);
+      //gpio_put(kDebugPin2, 0);
   
       // Get all IMU data and send to imu_spi_inbuf. The information is stored from index 1 to index 12.
       ImuSample sample_rxed;
@@ -583,21 +593,26 @@ int main(void) {
       }
   
       // Change mouse movement globals (communicates with hid_task()).
-      if (true)
+      if (false)
       {
         // Note, units are in pixels.
         //gDXMouse += ddx_pitch  * 1920.0f; // Positive = right.
         //gDYMouse -= ddx_roll * 1080.0f; // Positive = down.
       }
-  
+
+      // Change gamepad inputs.
+      if (false) {
+        gDYGamepad -= roll * 100; // Positive = down.
+        gDYGamepad -= roll * 100; // Positive = down.
+      }
       // Debug feature, unpulse at end of interrupt.
-      gpio_put(kDebugPin2, 1);
+      //gpio_put(kDebugPin2, 1);
     }
 
     // Pixart sensor interrupt checking.
     if (gpio_get(kPixartIntPin) == false) {
       // Pulse a debug pin.
-      gpio_put(kDebugPin1, 0);
+      //gpio_put(kDebugPin1, 0);
 
       // Get all Optical data and send to spi_inbuf.
       spi_write_read_blocking(spi1, pixart_spi_outbuf, pixart_spi_inbuf, kPixartSpiBufLen);
@@ -610,7 +625,7 @@ int main(void) {
       gDYMouse -= optical_x;
 
       // Unpulse a debug pin.
-      gpio_put(kDebugPin1, 1);
+      //gpio_put(kDebugPin1, 1);
     }
 
     // UART/TTL processing.
@@ -618,13 +633,15 @@ int main(void) {
     if (queue_try_remove(&gByteQueue, &byte)) {
       // Code below is executed a few times every "5ish" milliseconds.
 
-      static int data_counter = 0; // Stores where we are in a transmission (ie. SYNC = 0, MBDATA = 1, IMUDATA = 2-7, etc.)
-      static uint8_t temp = 0;
-
-      // SYNC byte is signaled with "byte" MSB being 1.
+      // "data_counter" stores where we are in the transmission (ie. SYNC = 0, MBDATA = 1, IMUDATA = 2-7, etc.)
+      // A sync byte is signaled with "byte" MSB being 1.
+      static int data_counter = 0;
       if (byte & 0x80)
         data_counter = 0;
 
+      // Process incoming byte based on where we are in the transmission.
+      // "temp" stores a byte for concurrent 16-bit numbers.
+      static uint8_t temp = 0;
       switch (data_counter) {
         case 0: {
           break;
@@ -640,6 +657,15 @@ int main(void) {
           scrl_ups <<= 4;
           scrl_ups >>= 4;
           gScrlUps += scrl_ups;
+
+          // Set scrollwheel up/down buttons.
+          gScrlDown = false;
+          gScrlUp = false;
+          if (scrl_ups & 0x08)
+            gScrlDown = true;
+          else if (scrl_ups)
+            gScrlUp = true;
+          
           break;
         }
         
@@ -691,7 +717,7 @@ int main(void) {
         }
       }
 
-
+      // Increment counter.
       data_counter++;
     }
   }
@@ -704,64 +730,13 @@ static void send_hid_report(uint8_t report_id) {
     return;
 
   switch (report_id) {
+    //case REPORT_ID_ABS_MOUSE:
     case REPORT_ID_MOUSE: {
-      // Calculate mode toggle.
-      static int mouse_mode = 0;
-      static bool prev_mb3 = 0;
-      if (!prev_mb3 && gMB3) {
-        mouse_mode++;
-        if(mouse_mode == 2)
-          mouse_mode = 0;
-        LedTask(true);
-      }
-      prev_mb3 = gMB3;
-
-      switch (mouse_mode) {
-      case 0: {
-          // Calculate amount to move cursor / "subtract" from gDXMouse & gDYMouse.
-          // turn to ints and manually saturate.
-          const int kFactor = 1; // To divide output for useability.
-          int dx = gDXMouse / kFactor;
-          int dy = gDYMouse / kFactor;
-          if (dx > 127)
-            dx = 127;
-          if (dx < -128)
-            dx = -128;
-          if (dy > 127)
-            dy = 127;
-          if (dy < -128)
-            dy = -128;
-    
-          // Create mouse button byte. [7to5=0][mb5][mb4][mb3][mb2][mb1].
-          uint8_t mouse_buttons = (gMB1) + (gMB2<<1) + (gMB3<<2);
-        
-          // Move mouse.
-          tud_hid_mouse_report(REPORT_ID_MOUSE, mouse_buttons, dx, dy, gScrlUps, 0);
-        
-          // Subtract the amount moved.
-          gDXMouse -= dx * kFactor;
-          gDYMouse -= dy * kFactor;
-          gScrlUps = 0;
-          break;
-        }
-        case 1: {
-          static int16_t center_x = 0;
-          static int16_t center_y = 0;
-
-          //hid_abs_mouse_report report = 0; 
-          //
-          //tud_hid_abs_mouse_report(REPORT_ID_MOUSE, 0, center_x, center_y, 0, 0);
-          break;
-        }
-      }
-      break;
-    }
-    
-    case REPORT_ID_GAMEPAD: {
-      // Same process as above.
-      const int kFactor = 5000;
-      int dx = gDXGamepad / kFactor;
-      int dy = gDYGamepad / kFactor;
+      // Calculate amount to move cursor / "subtract" from gDXMouse & gDYMouse.
+      // Then, turn to ints and manually saturate.
+      const int kFactor = 1; // To divide output for usability.
+      int dx = gDXMouse / kFactor;
+      int dy = gDYMouse / kFactor;
       if (dx > 127)
         dx = 127;
       if (dx < -128)
@@ -771,22 +746,92 @@ static void send_hid_report(uint8_t report_id) {
       if (dy < -128)
         dy = -128;
 
+      // Create mouse button byte. [7to5=0][mb5][mb4][mb3][mb2][mb1].
+      uint8_t mouse_buttons = (gMB1) + (gMB2<<1) + (gMB3<<2);
+
+      // Move mouse.
+      tud_hid_mouse_report(REPORT_ID_MOUSE, mouse_buttons, dx, dy, gScrlUps, 0);
+
+      // Subtract the amount moved.
+      gDXMouse -= dx * kFactor;
+      gDYMouse -= dy * kFactor;
+      gScrlUps = 0;
+
+      break;
+    }
+    
+    case REPORT_ID_GAMEPAD: {
+      // Create scaled and offset(centered) roll, pitch, and yaw values.
+      // Magic numbers chosen for usability.
+      static int p_offset = 0;
+      static int r_offset = 0;
+      static int y_offset = 0;
+      int pitch = (gHeadPitch/10 + 30) * -15;
+      int roll = gHeadRoll/10 * -15;
+      int yaw = gHeadYaw/10 * -7;
+      if (gMB3) {
+        p_offset = pitch;
+        r_offset = roll;
+        y_offset = yaw;
+      }
+      pitch -= p_offset;
+      roll -= r_offset;
+      yaw -= y_offset;
+
+      // Saturate to int8.
+      if (pitch > 127)
+        pitch = 127;
+      if (pitch < -128)
+        pitch = -128;
+      if (roll > 127)
+        roll = 127;
+      if (roll < -128)
+        roll = -128;
+      if (yaw > 127)
+        yaw = 127;
+      if (yaw < -128)
+        yaw = -128;
+
+      // Define report struct.
+      // Quick reference: (x,y,z,rz,rx,ry are int8) (hat is uint8) (buttons is uint32)
       hid_gamepad_report_t report = {
-        .x  = dx,
-        .y  = dy,
-        .z  = 0,
+        .x  = roll,
+        .y  = pitch,
+        .z  = yaw,
         .rz = 0,
         .rx = 0,
         .ry = 0,
         .hat = 0,
-        .buttons = 0
+        .buttons = (gMB1) + (gMB2<<1) + (gMB3<<2) + (gScrlUp << 3) + (gScrlDown << 4)
       };
 
-      //tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
+      // Send HID report.
+      tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
 
-      gDXGamepad -= dx * kFactor;
-      gDYGamepad -= dy * kFactor;
+      // Printf gamepad send.
+      //static absolute_time_t start = 0;
+      //if (get_absolute_time() - start >= 500000) {
+      //  start = get_absolute_time();
+      //  printf(
+      //    "MB1 %d\n"
+      //    "MB2 %d\n"
+      //    "MB3 %d\n"
+      //    "roll  %d\n"
+      //    "pitch %d\n"
+      //    "yaw   %d\n",
+      //    gMB1,
+      //    gMB2,
+      //    gMB3,
+      //    roll,
+      //    pitch,
+      //    yaw
+      //  );
+      //}
   
+      break;
+    }
+
+    default: {
       break;
     }
   }
@@ -819,9 +864,12 @@ void hid_task(void) {
   // Poll every 10ms.
   const uint32_t interval_ms = 10;
   static uint32_t start_ms = 0;
-  if ( board_millis() - start_ms < interval_ms)
-    return; // not enough time
-  start_ms += interval_ms;
+  uint32_t curr_ms = get_absolute_time()/1000;
+  if (curr_ms - start_ms < interval_ms)
+    return; // Not enough time.
+  if (tud_hid_ready() == false)
+    return; // Not ready.
+  start_ms = curr_ms;
 
   // Remote wakeup.
   if (tud_suspended()) {
@@ -849,7 +897,6 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
   return 0;
 }
-
 // Invoked when received SET_REPORT control request or received data on OUT endpoint ( Report ID = 0, Type = 0 ).
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
 

@@ -250,7 +250,6 @@ int main(void) {
     
     // IMU interrupt checking.
     // Note, the following variables are only sent occasionally.
-    // They must be static to account for info inbetween data sends.
     float roll_out, pitch_out, yaw_out;
     if (gpio_get(kImuIntPin) == false) {
       // Debug feature, pulse debug pin on interrupt negedge.
@@ -655,6 +654,7 @@ int main(void) {
 
         // Make IMU dataframe.
         const float kMultiplier = 180/M_PI * 4 * 10; // Convert to degrees, bit-shift left by 2, add one decimal point of precision.
+
         int16_t roll = roll_out * kMultiplier;
         uint8_t roll_14[2]; // Store the upper 14 bits of the int16 into two bytes.
         roll_14[0] = (roll >> 9) & 0x7f;  // Store the upper 7 bits.
